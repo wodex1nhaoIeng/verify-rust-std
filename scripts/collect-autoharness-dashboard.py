@@ -73,6 +73,12 @@ def main():
         deps = Path(target) / 'kani_verify_std' / 'target' / host / 'debug' / 'deps'
         metadata = sorted(deps.glob('*.kani-metadata.json'))
         if not metadata:
+            # Cargo 1.99+ gives each package its own debug/build/PKG/HASH/out/ (kani #4766).
+            deps = deps.parent
+            metadata = sorted(deps.rglob('*.kani-metadata.json'))
+        if len({path.name for path in metadata}) != len(metadata):
+            raise RuntimeError(f'Duplicate metadata file names under {deps}')
+        if not metadata:
             raise RuntimeError(f'No metadata in this run target directory: {deps}')
         for folder in ['metadata', 'scanner', 'metrics']:
             (dest / folder).mkdir()

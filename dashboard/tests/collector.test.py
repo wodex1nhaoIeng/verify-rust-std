@@ -24,6 +24,36 @@ class FakeProcess:
         return 0
 
 
+def run_with_layout(root, write_metadata):
+    """Run the collector with Kani stubbed; write_metadata(debug) lays out the metadata files."""
+    work = root / 'work'
+    (work / 'tool_config').mkdir(parents=True)
+    (work / 'tool_config/kani-version.toml').write_text('[kani]\ncommit = "' + '1'*40 + '"\n')
+
+    def fake_output(command, cwd):
+        if command[:2] == ['git', 'status']:
+            return ''
+        if command[0] == 'rustc':
+            return 'rustc fixture\nhost: x86_64-unknown-linux-gnu'
+        return '1'*40
+
+    def fake_run(command, **kwargs):
+        write_metadata(Path(command[-1]) / 'kani_verify_std/target/x86_64-unknown-linux-gnu/debug')
+        (work / 'kani-list.json').write_text('{"kani-version":"fixture"}')
+        (work / 'kani_build').mkdir(exist_ok=True)
+        (work / 'kani_build/rust-toolchain.toml').write_text('[toolchain]\nchannel="fixture"')
+        metrics = work / 'scripts/kani-std-analysis'
+        metrics.mkdir(parents=True, exist_ok=True)
+        for crate in ['core', 'alloc', 'std']:
+            (metrics / f'metrics-data-{crate}.json').write_text('{"results":[]}')
+        return FakeProcess()
+
+    dest = root / 'raw'
+    with patch('sys.argv', ['collector', '--work-dir', str(work), '--output-dir', str(dest)]), patch.object(collector.platform, 'system', return_value='Linux'), patch.object(collector.platform, 'machine', return_value='x86_64'), patch.object(collector, 'output', side_effect=fake_output), patch.object(collector.subprocess, 'Popen', side_effect=fake_run), patch.dict('os.environ', {'GITHUB_ACTIONS':'false'}), contextlib.redirect_stdout(io.StringIO()):
+        collector.main()
+    return dest
+
+
 class CollectorTest(unittest.TestCase):
     def test_capture_and_failure_propagation(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -93,6 +123,28 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue((failed / 'metrics.log').exists())
             self.assertFalse((failed / 'run.json').exists())
 
+
+    def test_per_package_output_layout(self):
+        # Cargo 1.99+ gives each package its own debug/build/PKG/HASH/out/ and creates no debug/deps.
+        def layout(debug):
+            for crate in ['core', 'alloc']:
+                out = debug / 'build' / crate / 'abc123' / 'out'
+                out.mkdir(parents=True)
+                (out / f'{crate}-abc123.kani-metadata.json').write_text('{}')
+        with tempfile.TemporaryDirectory() as folder:
+            dest = run_with_layout(Path(folder), layout)
+            self.assertEqual(sorted(p.name for p in (dest / 'metadata').iterdir()),
+                             ['alloc-abc123.kani-metadata.json', 'core-abc123.kani-metadata.json'])
+
+    def test_duplicate_metadata_names(self):
+        def layout(debug):
+            for build_hash in ['aaa', 'bbb']:
+                out = debug / 'build' / 'core' / build_hash / 'out'
+                out.mkdir(parents=True)
+                (out / 'core-x.kani-metadata.json').write_text('{}')
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(RuntimeError, 'Duplicate metadata'):
+                run_with_layout(Path(folder), layout)
 
 if __name__ == '__main__':
     unittest.main()
